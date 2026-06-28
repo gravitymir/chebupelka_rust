@@ -24,35 +24,45 @@
 2. **llama.cpp с `llama-server`**. Самый простой путь на Windows — скачать готовые
    бинарники со страницы релизов проекта `ggml-org/llama.cpp` на GitHub
    (ищи архив вида `llama-bXXXX-bin-win-...`). Внутри будет `llama-server.exe`.
-3. **Модель в формате .gguf** — например `Qwen3.5-35B-A3B` (квант `Q4_K_M`)
-   с Hugging Face, репозиторий `lmstudio-community`.
+3. **Модель в формате .gguf** — например `Qwen3-30B-A3B-Instruct-2507` (квант
+   `Q4_K_M`, ~18.5 ГБ) с Hugging Face, репозиторий `unsloth`. Это MoE: всего 30B,
+   но активны ~3B на токен — подходит для слабого GPU + 32 ГБ RAM.
 
-## Запуск (два терминала)
+## Запуск в один терминал (рекомендуется)
 
-**Терминал 1 — поднять движок llama.cpp:**
-
-```
-llama-server.exe -m C:\models\Qwen3.5-35B-A3B-Q4_K_M.gguf --port 8080 -c 4096 -ngl 10
-```
-- `-c 4096` — размер контекста;
-- `-ngl 10` — сколько слоёв грузить в видеопамять. У тебя 4 ГБ VRAM, так что
-  начни с 8–12; если не хватит памяти — уменьшай.
-
-**Терминал 2 — собрать и запустить llamadeck:**
+llamadeck сам поднимет `llama-server` и погасит его при выходе — нужно лишь указать
+путь к модели через `--model-path`:
 
 ```
-cargo run --release -- serve
+cargo run --release -- --model-path models\Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf serve
 ```
 Открой в браузере http://127.0.0.1:3000
 
-Режим терминала вместо браузера:
+Полезные флаги авто-запуска (все необязательные):
+- `--llama-bin llama\llama-server.exe` — путь к движку, если он не в PATH;
+- `--ngl 0` — сколько слоёв выгрузить на GPU. На T2000 (4 ГБ) начинай с малого;
+  `0` — целиком на CPU (надёжно, для A3B вполне терпимо);
+- `--ctx 4096` — размер контекста;
+- `--engine-port 8080` — порт, на котором поднимать движок.
+
+Режим терминала вместо браузера — то же самое, но `chat`:
 ```
-cargo run --release -- chat
+cargo run --release -- --model-path models\Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf chat
 ```
 
-Если llama-server слушает другой адрес/порт:
+## Запуск в два терминала (свой llama-server)
+
+Если хочешь управлять движком сам — запусти его отдельно и подключись по `--upstream`:
+
+**Терминал 1 — движок:**
 ```
-cargo run --release -- --upstream http://127.0.0.1:9090 serve
+llama-server.exe -m models\Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf --port 8080 -c 4096 -ngl 0
+```
+
+**Терминал 2 — llamadeck (без `--model-path` → подключается к готовому):**
+```
+cargo run --release -- serve
+cargo run --release -- --upstream http://127.0.0.1:9090 serve   # другой адрес движка
 ```
 
 ## Эндпоинты
@@ -74,6 +84,7 @@ cargo run --release -- --upstream http://127.0.0.1:9090 serve
 - Кнопка «стоп» (отмена генерации) — пробросить cancel в стрим.
 - Сохранение истории диалогов на диск.
 - График скорости на странице статистики.
-- Авто-запуск `llama-server` как дочернего процесса прямо из llamadeck
-  (через `tokio::process::Command`) — чтобы был один терминал.
 - Переезд на FFI (`llama-cpp-2`) → один бинарник без отдельного llama-server.
+
+> Авто-запуск `llama-server` дочерним процессом уже сделан — см. «Запуск в один
+> терминал» выше (`src/engine.rs`).

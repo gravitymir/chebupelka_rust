@@ -3,3 +3,9 @@ Cargo.lock
 
 # локальные настройки Claude Code — не в репозиторий
 /.claude/settings.local.json
+
+# модели .gguf — большие, качаются отдельно, не в git
+/models
+
+# движок llama.cpp (готовые бинарники) — скачивается отдельно, не в git
+/llama

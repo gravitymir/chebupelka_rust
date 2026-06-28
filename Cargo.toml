@@ -5,7 +5,7 @@ edition = "2021"
 description = "Маленькая Rust-обёртка над llama.cpp (llama-server): веб-чат, CLI и статистика"
 
 [dependencies]
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-std", "io-util", "process", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-std", "io-util", "process", "time", "signal"] }
 axum = "0.7"
 # только http (общаемся с локальным llama-server), без TLS — чтобы не тянуть openssl/ring
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream"] }

@@ -43,8 +43,16 @@ pub async fn run(be: Backend, bind: &str) -> Result<()> {
 
     let listener = tokio::net::TcpListener::bind(bind).await?;
     println!("llamadeck слушает http://{bind}  (Ctrl+C для выхода)");
-    axum::serve(listener, router).await?;
+    axum::serve(listener, router)
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
     Ok(())
+}
+
+/// Ждём Ctrl+C — тогда axum завершится штатно, а вызывающий код успеет погасить движок.
+async fn shutdown_signal() {
+    let _ = tokio::signal::ctrl_c().await;
+    println!("\nОстанавливаюсь...");
 }
 
 async fn index() -> Html<&'static str> {
