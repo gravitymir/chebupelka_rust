@@ -61,6 +61,24 @@ impl CompleteResult {
     }
 }
 
+/// Один вызов инструмента, который запросила модель.
+#[derive(Clone)]
+pub struct ToolCall {
+    pub id: String,
+    pub name: String,
+    /// аргументы — JSON-строка (как их отдаёт OpenAI-совместимый API)
+    pub arguments: String,
+}
+
+/// Ход ассистента в агентском режиме: текст и/или запрошенные вызовы инструментов.
+pub struct AssistantTurn {
+    /// сырое сообщение ассистента — его нужно добавить обратно в историю «как есть»,
+    /// чтобы последующие сообщения роли `tool` корректно ссылались на tool_call_id
+    pub message: serde_json::Value,
+    pub content: String,
+    pub tool_calls: Vec<ToolCall>,
+}
+
 impl Backend {
     pub fn new(upstream: String, model: String) -> Self {
         Self {
@@ -102,6 +120,56 @@ impl Backend {
             .unwrap_or_default();
         let tokens = parsed.usage.and_then(|u| u.completion_tokens).unwrap_or(0);
         Ok(CompleteResult { reply, tokens, ms })
+    }
+
+    /// Запрос с инструментами (агентский режим). Не потоковый: возвращает один
+    /// ход ассистента — его текст и/или список вызовов инструментов.
+    pub async fn chat_tools(
+        &self,
+        messages: &[serde_json::Value],
+        tools: &serde_json::Value,
+    ) -> Result<AssistantTurn> {
+        let body = serde_json::json!({
+            "model": self.model,
+            "messages": messages,
+            "tools": tools,
+            "tool_choice": "auto",
+            "temperature": 0.2,
+            "max_tokens": 1024,
+        });
+        let resp = self
+            .client
+            .post(self.url())
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| anyhow!("не достучался до llama-server ({}): {e}", self.upstream))?
+            .error_for_status()
+            .map_err(|e| anyhow!("llama-server вернул ошибку: {e}"))?;
+        let v: serde_json::Value = resp.json().await?;
+        let msg = v["choices"][0]["message"].clone();
+        if msg.is_null() {
+            return Err(anyhow!("пустой ответ от llama-server (нет choices[0].message)"));
+        }
+        let content = msg["content"].as_str().unwrap_or("").to_string();
+        let mut tool_calls = Vec::new();
+        if let Some(arr) = msg["tool_calls"].as_array() {
+            for tc in arr {
+                tool_calls.push(ToolCall {
+                    id: tc["id"].as_str().unwrap_or("").to_string(),
+                    name: tc["function"]["name"].as_str().unwrap_or("").to_string(),
+                    arguments: tc["function"]["arguments"]
+                        .as_str()
+                        .unwrap_or("{}")
+                        .to_string(),
+                });
+            }
+        }
+        Ok(AssistantTurn {
+            message: msg,
+            content,
+            tool_calls,
+        })
     }
 
     /// Потоковый ответ: отдаёт кусочки текста по мере генерации.

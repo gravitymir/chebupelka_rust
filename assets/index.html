@@ -11,7 +11,7 @@
   }
   * { box-sizing: border-box; }
   body {
-    margin: 0; height: 100vh; display: grid; grid-template-rows: auto 1fr auto;
+    margin: 0; height: 100vh; display: grid; grid-template-rows: auto 1fr;
     background: var(--bg); color: var(--text);
     font: 15px/1.5 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   }
@@ -43,6 +43,35 @@
   button.stop { background: #c4503b; color: #fff; }
   .err { color: #e0573b; }
   .dim { color: var(--dim); }
+
+  /* переключатель режимов в шапке */
+  header .modes { margin-left: auto; display: flex; gap: 6px; }
+  header .modes button { padding: 5px 14px; font-size: 13px; font-weight: 600; background: var(--bg); color: var(--dim); border: 1px solid var(--line); }
+  header .modes button.active { background: var(--accent); color: #14110f; border-color: var(--accent); }
+
+  /* области режимов */
+  #content { min-height: 0; }
+  #chat-view, #agent-view { height: 100%; display: flex; flex-direction: column; min-height: 0; }
+  [hidden] { display: none !important; }
+
+  /* агент */
+  #agent-acts { flex: 1; overflow-y: auto; padding: 18px 16px; display: flex; flex-direction: column; gap: 10px; }
+  #agent-bar { border-top: 1px solid var(--line); background: var(--panel); padding: 12px 16px; display: flex; flex-direction: column; gap: 10px; }
+  #agent-tools { display: flex; flex-wrap: wrap; gap: 14px; font-size: 13px; }
+  #agent-tools label { color: var(--dim); cursor: pointer; user-select: none; }
+  #agent-tools input { accent-color: var(--accent); margin-right: 5px; vertical-align: -1px; }
+  #agent-bar .row { display: flex; gap: 10px; }
+  .act { max-width: 860px; font-size: 14px; }
+  .act .lbl { font-size: 11px; text-transform: uppercase; letter-spacing: .8px; margin-bottom: 3px; }
+  .act pre { margin: 0; white-space: pre-wrap; word-wrap: break-word; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; max-height: 260px; overflow: auto; font-size: 13px; }
+  .act.call .lbl { color: var(--accent); }
+  .act.result .lbl { color: #6fae6f; }
+  .act.result.err .lbl { color: #e0573b; }
+  .act.denied { color: #e0a13b; }
+  .act.final .lbl { color: var(--accent); }
+  .act.final .body { border-left: 2px solid var(--accent); padding-left: 12px; white-space: pre-wrap; word-wrap: break-word; }
+  .act.assistant .body { color: var(--dim); white-space: pre-wrap; word-wrap: break-word; }
+  .act.status { color: var(--dim); font-size: 12px; }
 </style>
 </head>
 <body>
@@ -52,15 +81,36 @@
     <div class="stat">токенов: <span id="s-tok">0</span></div>
     <div class="stat">средн.: <span id="s-tps">0.0</span> ток/с</div>
     <div class="stat">аптайм: <span id="s-up">0</span>с</div>
+    <div class="modes">
+      <button id="mode-chat" class="active">Чат</button>
+      <button id="mode-agent">Агент</button>
+    </div>
   </header>
 
-  <div id="log"></div>
+  <div id="content">
+    <section id="chat-view">
+      <div id="log"></div>
+      <footer>
+        <textarea id="input" placeholder="Сообщение… (Enter — отправить, Shift+Enter — перенос)"></textarea>
+        <button id="send">Отправить</button>
+        <button id="stop" class="stop" style="display:none">Стоп</button>
+      </footer>
+    </section>
 
-  <footer>
-    <textarea id="input" placeholder="Сообщение… (Enter — отправить, Shift+Enter — перенос)"></textarea>
-    <button id="send">Отправить</button>
-    <button id="stop" class="stop" style="display:none">Стоп</button>
-  </footer>
+    <section id="agent-view" hidden>
+      <div id="agent-acts">
+        <div class="act status">Опиши задачу, отметь разрешённые инструменты и нажми «Запустить». Каждый шаг агента — вызовы инструментов и их результаты — появится здесь.</div>
+      </div>
+      <div id="agent-bar">
+        <div id="agent-tools"></div>
+        <div class="row">
+          <textarea id="agent-task" placeholder="Задача агенту… (напр.: покажи файлы в папке src и прочитай Cargo.toml)"></textarea>
+          <button id="agent-run">Запустить</button>
+          <button id="agent-stop" class="stop" hidden>Стоп</button>
+        </div>
+      </div>
+    </section>
+  </div>
 
 <script>
 const log = document.getElementById('log');
@@ -151,6 +201,136 @@ sendBtn.onclick = send;
 stopBtn.onclick = () => { if (controller) controller.abort(); };
 input.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+});
+
+// ---- переключатель режимов (Чат / Агент) ----
+const modeChatBtn = document.getElementById('mode-chat');
+const modeAgentBtn = document.getElementById('mode-agent');
+const chatView = document.getElementById('chat-view');
+const agentView = document.getElementById('agent-view');
+function setMode(agent) {
+  agentView.hidden = !agent;
+  chatView.hidden = agent;
+  modeAgentBtn.classList.toggle('active', agent);
+  modeChatBtn.classList.toggle('active', !agent);
+  (agent ? agentTask : input).focus();
+}
+modeChatBtn.onclick = () => setMode(false);
+modeAgentBtn.onclick = () => setMode(true);
+
+// ---- агент ----
+const agentActs = document.getElementById('agent-acts');
+const agentTools = document.getElementById('agent-tools');
+const agentTask = document.getElementById('agent-task');
+const agentRunBtn = document.getElementById('agent-run');
+const agentStopBtn = document.getElementById('agent-stop');
+let agentCtrl = null;
+
+// по умолчанию разрешаем только безопасные (чтение); запись/команды — вручную
+const SAFE_DEFAULT = new Set(['read_file', 'list_dir']);
+async function loadTools() {
+  try {
+    const tools = await (await fetch('/api/agent/tools')).json();
+    agentTools.innerHTML = '';
+    for (const t of tools) {
+      const lbl = document.createElement('label');
+      const cb = document.createElement('input');
+      cb.type = 'checkbox'; cb.value = t.name; cb.checked = SAFE_DEFAULT.has(t.name);
+      lbl.appendChild(cb);
+      lbl.appendChild(document.createTextNode(' ' + t.desc + ' (' + t.name + ')'));
+      agentTools.appendChild(lbl);
+    }
+  } catch (_) {}
+}
+loadTools();
+
+function addAct(cls, label, body, pre) {
+  const el = document.createElement('div');
+  el.className = 'act ' + cls;
+  if (label) { const l = document.createElement('div'); l.className = 'lbl'; l.textContent = label; el.appendChild(l); }
+  if (body !== undefined) {
+    const b = document.createElement(pre ? 'pre' : 'div');
+    if (!pre) b.className = 'body';
+    b.textContent = body;
+    el.appendChild(b);
+  }
+  agentActs.appendChild(el);
+  agentActs.scrollTop = agentActs.scrollHeight;
+  return el;
+}
+
+function setAgentRunning(on) {
+  agentRunBtn.disabled = on;
+  agentStopBtn.hidden = !on;
+}
+
+function handleAgentEvent(kind, data) {
+  let d = {};
+  try { d = JSON.parse(data); } catch (_) { return; }
+  switch (kind) {
+    case 'status': addAct('status', '', '· ' + d.text); break;
+    case 'assistant': if (d.text && d.text.trim()) addAct('assistant', 'модель', d.text); break;
+    case 'tool_call': {
+      let args = d.args;
+      try { args = JSON.stringify(JSON.parse(d.args)); } catch (_) {}
+      addAct('call', '→ вызов: ' + d.name, args, true);
+      break;
+    }
+    case 'tool_result': addAct('result' + (d.ok ? '' : ' err'), '← ' + d.name + (d.ok ? '' : ' (ошибка)'), d.result, true); break;
+    case 'denied': addAct('denied', '', '⛔ Инструмент «' + d.name + '» не разрешён.'); break;
+    case 'final': addAct('final', '✓ итог', (d.text && d.text.trim()) ? d.text : '(готово)'); break;
+    case 'error': addAct('result err', 'ошибка', d.text, true); break;
+  }
+}
+
+async function runAgent() {
+  const task = agentTask.value.trim();
+  if (!task) return;
+  const allowed = [...agentTools.querySelectorAll('input:checked')].map(i => i.value);
+  agentTask.value = '';
+  setAgentRunning(true);
+  addAct('status', '', '▶ Задача: ' + task + '  · разрешено: ' + (allowed.join(', ') || 'ничего'));
+  agentCtrl = new AbortController();
+
+  try {
+    const resp = await fetch('/api/agent/stream', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ task, allowed }),
+      signal: agentCtrl.signal,
+    });
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    const reader = resp.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '';
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      const events = buf.split('\n\n');
+      buf = events.pop();
+      for (const ev of events) {
+        let kind = '', data = '';
+        for (const line of ev.split('\n')) {
+          if (line.startsWith('event:')) kind = line.slice(6).trim();
+          if (line.startsWith('data:')) data += line.slice(5).replace(/^ /, '');
+        }
+        if (kind && kind !== 'end') handleAgentEvent(kind, data);
+      }
+    }
+  } catch (e) {
+    if (e.name === 'AbortError') addAct('denied', '', '⏹ Агент остановлен.');
+    else addAct('result err', 'ошибка', e.message, true);
+  } finally {
+    agentCtrl = null;
+    setAgentRunning(false);
+  }
+}
+
+agentRunBtn.onclick = runAgent;
+agentStopBtn.onclick = () => { if (agentCtrl) agentCtrl.abort(); };
+agentTask.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); runAgent(); }
 });
 
 async function pollStats() {

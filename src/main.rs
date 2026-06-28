@@ -1,3 +1,4 @@
+mod agent;
 mod backend;
 mod engine;
 mod server;

@@ -47,6 +47,9 @@ impl Engine {
             .arg(opts.ctx.to_string())
             .arg("-ngl")
             .arg(opts.ngl.to_string())
+            // --jinja включает родной шаблон модели и разбор tool_calls —
+            // без него не работает агентский режим (вызов инструментов).
+            .arg("--jinja")
             .kill_on_drop(true);
 
         println!(

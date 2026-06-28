@@ -29,6 +29,14 @@ struct ChatBody {
     messages: Vec<Msg>,
 }
 
+#[derive(Deserialize)]
+struct AgentBody {
+    task: String,
+    /// имена инструментов, которые пользователь разрешил агенту
+    #[serde(default)]
+    allowed: Vec<String>,
+}
+
 pub async fn run(be: Backend, bind: &str) -> Result<()> {
     let state = AppState {
         be,
@@ -39,6 +47,8 @@ pub async fn run(be: Backend, bind: &str) -> Result<()> {
         .route("/api/chat", post(chat))
         .route("/api/chat/stream", post(chat_stream))
         .route("/api/stats", get(stats_handler))
+        .route("/api/agent/tools", get(agent_tools))
+        .route("/api/agent/stream", post(agent_stream))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(bind).await?;
@@ -53,6 +63,30 @@ pub async fn run(be: Backend, bind: &str) -> Result<()> {
 async fn shutdown_signal() {
     let _ = tokio::signal::ctrl_c().await;
     println!("\nОстанавливаюсь...");
+}
+
+/// Список доступных инструментов агента (имя + описание) — для галочек в UI.
+async fn agent_tools() -> impl IntoResponse {
+    let items: Vec<_> = crate::agent::catalog()
+        .into_iter()
+        .map(|(name, desc)| serde_json::json!({ "name": name, "desc": desc }))
+        .collect();
+    Json(items)
+}
+
+/// Запуск агента: стримим события (вызовы инструментов, результаты, финал) по SSE.
+async fn agent_stream(State(app): State<AppState>, Json(body): Json<AgentBody>) -> impl IntoResponse {
+    let be = app.be.clone();
+    let stream = async_stream::stream! {
+        let events = crate::agent::run(be, body.task, body.allowed);
+        futures_util::pin_mut!(events);
+        while let Some(ev) = events.next().await {
+            let (kind, data) = ev.to_sse();
+            yield Ok::<Event, Infallible>(Event::default().event(kind).data(data.to_string()));
+        }
+        yield Ok(Event::default().event("end").data("end"));
+    };
+    Sse::new(stream)
 }
 
 async fn index() -> Html<&'static str> {
