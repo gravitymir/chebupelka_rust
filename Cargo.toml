@@ -1,0 +1,22 @@
+[package]
+name = "llamadeck"
+version = "0.1.0"
+edition = "2021"
+description = "Маленькая Rust-обёртка над llama.cpp (llama-server): веб-чат, CLI и статистика"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-std", "io-util", "process", "time"] }
+axum = "0.7"
+# только http (общаемся с локальным llama-server), без TLS — чтобы не тянуть openssl/ring
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+clap = { version = "=4.5.4", features = ["derive"] }
+futures-util = "0.3"
+async-stream = "0.3"
+anyhow = "1"
+# пины ради совместимости со старым тулчейном Rust 1.75 (на твоей машине это не нужно)
+url = "=2.5.0"
+
+[profile.release]
+opt-level = 2
