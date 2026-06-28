@@ -40,7 +40,9 @@
     background: var(--accent); color: #14110f; font: inherit; font-weight: 700;
   }
   button:disabled { opacity: .5; cursor: default; }
+  button.stop { background: #c4503b; color: #fff; }
   .err { color: #e0573b; }
+  .dim { color: var(--dim); }
 </style>
 </head>
 <body>
@@ -57,13 +59,22 @@
   <footer>
     <textarea id="input" placeholder="Сообщение… (Enter — отправить, Shift+Enter — перенос)"></textarea>
     <button id="send">Отправить</button>
+    <button id="stop" class="stop" style="display:none">Стоп</button>
   </footer>
 
 <script>
 const log = document.getElementById('log');
 const input = document.getElementById('input');
 const sendBtn = document.getElementById('send');
+const stopBtn = document.getElementById('stop');
 const history = [];
+let controller = null; // AbortController текущей генерации (для кнопки «Стоп»)
+
+// переключение UI между «можно отправлять» и «идёт генерация, можно остановить»
+function setGenerating(on) {
+  sendBtn.disabled = on;
+  stopBtn.style.display = on ? '' : 'none';
+}
 
 function addMsg(role, text) {
   const el = document.createElement('div');
@@ -80,18 +91,20 @@ async function send() {
   const text = input.value.trim();
   if (!text) return;
   input.value = '';
-  sendBtn.disabled = true;
+  setGenerating(true);
 
   addMsg('user', text);
   history.push({ role: 'user', content: text });
   const out = addMsg('assistant', '');
   let acc = '';
+  controller = new AbortController();
 
   try {
     const resp = await fetch('/api/chat/stream', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ messages: history }),
+      signal: controller.signal, // позволяет оборвать генерацию кнопкой «Стоп»
     });
     if (!resp.ok) throw new Error('HTTP ' + resp.status);
 
@@ -111,20 +124,31 @@ async function send() {
           if (line.startsWith('event:') && line.includes('done')) { /* конец */ }
           if (line.startsWith('data:')) data += line.slice(5).replace(/^ /, '');
         }
-        if (isErr) { out.innerHTML = '<span class="err">Ошибка: ' + data + '</span>'; return; }
+        if (isErr) { out.innerHTML = '<span class="err">Ошибка: ' + data + '</span>'; history.pop(); return; }
         if (data) { acc += data; out.textContent = acc; log.scrollTop = log.scrollHeight; }
       }
     }
     history.push({ role: 'assistant', content: acc });
   } catch (e) {
-    out.innerHTML = '<span class="err">Ошибка: ' + e.message + '</span>';
+    if (e.name === 'AbortError') {
+      // нажали «Стоп»: сохраняем то, что успело сгенерироваться (если успело)
+      out.textContent = acc;
+      out.insertAdjacentHTML('beforeend', ' <span class="dim">[остановлено]</span>');
+      if (acc) history.push({ role: 'assistant', content: acc });
+      else history.pop(); // ничего не пришло — убираем неотвеченный вопрос
+    } else {
+      out.innerHTML = '<span class="err">Ошибка: ' + e.message + '</span>';
+      history.pop();
+    }
   } finally {
-    sendBtn.disabled = false;
+    controller = null;
+    setGenerating(false);
     input.focus();
   }
 }
 
 sendBtn.onclick = send;
+stopBtn.onclick = () => { if (controller) controller.abort(); };
 input.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
 });
