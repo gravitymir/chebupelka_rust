@@ -77,6 +77,23 @@
   .act.final .body { border-left: 2px solid var(--accent); padding-left: 12px; white-space: pre-wrap; word-wrap: break-word; }
   .act.assistant .body { color: var(--dim); white-space: pre-wrap; word-wrap: break-word; }
   .act.status { color: var(--dim); font-size: 12px; }
+
+  /* тулбар истории в чате */
+  #chat-bar { display: flex; align-items: center; gap: 10px; padding: 8px 16px; border-bottom: 1px solid var(--line); background: var(--panel); }
+  #chat-bar button { padding: 5px 12px; font-size: 13px; }
+  #chat-bar select { flex: 0 1 380px; }
+  #chat-saved { font-size: 12px; }
+
+  /* статистика */
+  #stats-view { height: 100%; overflow-y: auto; }
+  .stats-wrap { padding: 22px 18px; display: flex; flex-direction: column; gap: 22px; max-width: 980px; }
+  .stats-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
+  .metric { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; }
+  .metric .num { font-size: 28px; font-weight: 700; color: var(--accent); }
+  .metric .cap { font-size: 12px; color: var(--dim); margin-top: 4px; }
+  .chart-box { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; }
+  .chart-title { font-size: 13px; color: var(--dim); margin-bottom: 10px; }
+  #spd-chart { width: 100%; height: 280px; display: block; }
 </style>
 </head>
 <body>
@@ -89,11 +106,17 @@
     <div class="modes">
       <button id="mode-chat" class="active">Чат</button>
       <button id="mode-agent">Агент</button>
+      <button id="mode-stats">Статистика</button>
     </div>
   </header>
 
   <div id="content">
     <section id="chat-view">
+      <div id="chat-bar">
+        <button id="chat-new">+ Новый</button>
+        <select id="chat-history"><option value="">— сохранённые диалоги —</option></select>
+        <span id="chat-saved" class="dim"></span>
+      </div>
       <div id="log"></div>
       <footer>
         <textarea id="input" placeholder="Сообщение… (Enter — отправить, Shift+Enter — перенос)"></textarea>
@@ -120,6 +143,22 @@
           <textarea id="agent-task" placeholder="Задача агенту… (напр.: покажи файлы в папке src и прочитай Cargo.toml)"></textarea>
           <button id="agent-run">Запустить</button>
           <button id="agent-stop" class="stop" hidden>Стоп</button>
+        </div>
+      </div>
+    </section>
+
+    <section id="stats-view" hidden>
+      <div class="stats-wrap">
+        <div class="stats-grid">
+          <div class="metric"><div class="num" id="m-req">0</div><div class="cap">запросов</div></div>
+          <div class="metric"><div class="num" id="m-tok">0</div><div class="cap">токенов</div></div>
+          <div class="metric"><div class="num" id="m-tps">0.0</div><div class="cap">средн. ток/с</div></div>
+          <div class="metric"><div class="num" id="m-up">0</div><div class="cap">аптайм, с</div></div>
+        </div>
+        <div class="chart-box">
+          <div class="chart-title">Скорость последних запросов (ток/с)</div>
+          <canvas id="spd-chart" width="900" height="280"></canvas>
+          <div id="spd-empty" class="dim">Пока нет данных — отправь пару сообщений в чате.</div>
         </div>
       </div>
     </section>
@@ -206,6 +245,8 @@ async function send() {
   } finally {
     controller = null;
     setGenerating(false);
+    // авто-сохранение диалога, если в нём появился ответ модели
+    if (history.length && history[history.length - 1].role === 'assistant') saveConversation();
     input.focus();
   }
 }
@@ -216,20 +257,29 @@ input.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
 });
 
-// ---- переключатель режимов (Чат / Агент) ----
-const modeChatBtn = document.getElementById('mode-chat');
-const modeAgentBtn = document.getElementById('mode-agent');
-const chatView = document.getElementById('chat-view');
-const agentView = document.getElementById('agent-view');
-function setMode(agent) {
-  agentView.hidden = !agent;
-  chatView.hidden = agent;
-  modeAgentBtn.classList.toggle('active', agent);
-  modeChatBtn.classList.toggle('active', !agent);
-  (agent ? agentTask : input).focus();
+// ---- переключатель режимов (Чат / Агент / Статистика) ----
+const views = {
+  chat: document.getElementById('chat-view'),
+  agent: document.getElementById('agent-view'),
+  stats: document.getElementById('stats-view'),
+};
+const modeBtns = {
+  chat: document.getElementById('mode-chat'),
+  agent: document.getElementById('mode-agent'),
+  stats: document.getElementById('mode-stats'),
+};
+function setMode(name) {
+  for (const k in views) {
+    views[k].hidden = (k !== name);
+    modeBtns[k].classList.toggle('active', k === name);
+  }
+  if (name === 'chat') input.focus();
+  else if (name === 'agent') agentTask.focus();
+  else if (name === 'stats') drawChart();
 }
-modeChatBtn.onclick = () => setMode(false);
-modeAgentBtn.onclick = () => setMode(true);
+modeBtns.chat.onclick = () => setMode('chat');
+modeBtns.agent.onclick = () => setMode('agent');
+modeBtns.stats.onclick = () => setMode('stats');
 
 // ---- агент ----
 const agentActs = document.getElementById('agent-acts');
@@ -381,13 +431,122 @@ agentTask.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); runAgent(); }
 });
 
+// ---- история диалогов (пункт 3) ----
+const chatNewBtn = document.getElementById('chat-new');
+const chatHistorySel = document.getElementById('chat-history');
+const chatSaved = document.getElementById('chat-saved');
+let convId = null; // id текущего диалога на диске (null = ещё не сохранён)
+
+async function saveConversation() {
+  if (!history.length) return;
+  try {
+    const r = await fetch('/api/history', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: convId, messages: history }),
+    });
+    const j = await r.json();
+    if (j.id) {
+      convId = j.id;
+      chatSaved.textContent = '✓ сохранено';
+      setTimeout(() => { chatSaved.textContent = ''; }, 1500);
+    }
+    loadHistoryList();
+  } catch (_) {}
+}
+
+async function loadHistoryList() {
+  try {
+    const list = await (await fetch('/api/history')).json();
+    chatHistorySel.innerHTML = '<option value="">— сохранённые диалоги —</option>';
+    for (const c of list) {
+      const o = document.createElement('option');
+      o.value = c.id;
+      o.textContent = c.title + ' (' + c.count + ')';
+      if (c.id === convId) o.selected = true;
+      chatHistorySel.appendChild(o);
+    }
+  } catch (_) {}
+}
+
+async function openConversation(id) {
+  if (!id) return;
+  try {
+    const c = await (await fetch('/api/history/' + id)).json();
+    const msgs = Array.isArray(c.messages) ? c.messages : [];
+    history.length = 0;
+    log.innerHTML = '';
+    for (const m of msgs) { history.push({ role: m.role, content: m.content }); addMsg(m.role, m.content); }
+    convId = c.id;
+    setMode('chat');
+  } catch (_) {}
+}
+
+function newChat() {
+  history.length = 0;
+  convId = null;
+  log.innerHTML = '';
+  chatHistorySel.value = '';
+  input.focus();
+}
+
+chatNewBtn.onclick = newChat;
+chatHistorySel.onchange = () => openConversation(chatHistorySel.value);
+loadHistoryList();
+
+// ---- график скорости (пункт 4) ----
+const spdCanvas = document.getElementById('spd-chart');
+const spdEmpty = document.getElementById('spd-empty');
+let lastRecent = [];
+
+function drawChart() {
+  const data = lastRecent;
+  const ctx = spdCanvas.getContext('2d');
+  const W = spdCanvas.width, H = spdCanvas.height;
+  ctx.clearRect(0, 0, W, H);
+  if (!data.length) { spdEmpty.hidden = false; return; }
+  spdEmpty.hidden = true;
+
+  const pad = 36;
+  const max = Math.max(...data, 1) * 1.15;
+  const x0 = pad, x1 = W - 12, y0 = H - pad, y1 = 12;
+
+  // оси
+  ctx.strokeStyle = '#322b25'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(x0, y1); ctx.lineTo(x0, y0); ctx.lineTo(x1, y0); ctx.stroke();
+  // подписи Y
+  ctx.fillStyle = '#9a8e80'; ctx.font = '12px ui-monospace, monospace';
+  ctx.fillText('0', 10, y0 + 4);
+  ctx.fillText(max.toFixed(0), 10, y1 + 10);
+
+  const n = data.length;
+  const sx = (i) => n === 1 ? (x0 + x1) / 2 : x0 + (x1 - x0) * i / (n - 1);
+  const sy = (v) => y0 - (y0 - y1) * (v / max);
+
+  // линия
+  ctx.strokeStyle = '#e0792b'; ctx.lineWidth = 2;
+  ctx.beginPath();
+  data.forEach((v, i) => { const x = sx(i), y = sy(v); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
+  ctx.stroke();
+  // точки
+  ctx.fillStyle = '#e0792b';
+  data.forEach((v, i) => { ctx.beginPath(); ctx.arc(sx(i), sy(v), 2.5, 0, Math.PI * 2); ctx.fill(); });
+}
+
 async function pollStats() {
   try {
     const s = await (await fetch('/api/stats')).json();
+    // компактные счётчики в шапке
     document.getElementById('s-req').textContent = s.requests;
     document.getElementById('s-tok').textContent = s.tokens;
     document.getElementById('s-tps').textContent = s.avg_tok_per_s.toFixed(1);
     document.getElementById('s-up').textContent = s.uptime_s;
+    // вкладка «Статистика»
+    document.getElementById('m-req').textContent = s.requests;
+    document.getElementById('m-tok').textContent = s.tokens;
+    document.getElementById('m-tps').textContent = s.avg_tok_per_s.toFixed(1);
+    document.getElementById('m-up').textContent = s.uptime_s;
+    lastRecent = s.recent || [];
+    if (!views.stats.hidden) drawChart();
   } catch (_) {}
 }
 setInterval(pollStats, 1000);

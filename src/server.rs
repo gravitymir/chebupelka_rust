@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 use axum::{
-    extract::State,
+    extract::{Path, State},
     http::StatusCode,
     response::{
         sse::{Event, Sse},
@@ -62,6 +62,8 @@ pub async fn run(be: Backend, bind: &str) -> Result<()> {
         .route("/api/agent/tools", get(agent_tools))
         .route("/api/agent/stream", post(agent_stream))
         .route("/api/agent/approve", post(agent_approve))
+        .route("/api/history", get(history_list).post(history_save))
+        .route("/api/history/:id", get(history_get).delete(history_delete))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(bind).await?;
@@ -108,6 +110,45 @@ async fn agent_stream(State(app): State<AppState>, Json(body): Json<AgentBody>) 
 async fn agent_approve(State(app): State<AppState>, Json(b): Json<ApproveBody>) -> impl IntoResponse {
     let found = app.approvals.resolve(&b.id, b.approved);
     Json(serde_json::json!({ "ok": found }))
+}
+
+#[derive(Deserialize)]
+struct SaveBody {
+    #[serde(default)]
+    id: Option<String>,
+    messages: serde_json::Value,
+}
+
+/// Список сохранённых диалогов (новые сверху).
+async fn history_list() -> impl IntoResponse {
+    match crate::history::list() {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+/// Загрузить один диалог по id.
+async fn history_get(Path(id): Path<String>) -> impl IntoResponse {
+    match crate::history::load(&id) {
+        Ok(c) => Json(c).into_response(),
+        Err(e) => (StatusCode::NOT_FOUND, e.to_string()).into_response(),
+    }
+}
+
+/// Сохранить (создать/обновить) диалог. Возвращает его id.
+async fn history_save(Json(b): Json<SaveBody>) -> impl IntoResponse {
+    match crate::history::save(b.id, b.messages) {
+        Ok(id) => Json(serde_json::json!({ "id": id })).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+    }
+}
+
+/// Удалить диалог.
+async fn history_delete(Path(id): Path<String>) -> impl IntoResponse {
+    match crate::history::delete(&id) {
+        Ok(_) => Json(serde_json::json!({ "ok": true })).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+    }
 }
 
 async fn index() -> Html<&'static str> {

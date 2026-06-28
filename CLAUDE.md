@@ -37,8 +37,9 @@ llama-server) затронул только этот файл. Не размаз
 - `src/backend.rs` — слой инференса: `complete()` (полный ответ), `stream()` (потоковый) и `chat_tools()` (запрос с инструментами для агента). Тут и только тут — знание про HTTP-протокол llama-server.
 - `src/engine.rs` — авто-запуск `llama-server` дочерним процессом (`tokio::process`) + health-check по `/health` + остановка (`kill_on_drop`). Включается флагом `--model-path`. Запускает движок с `--jinja` (нужно для tool-calling). При переезде на FFI удаляется целиком.
 - `src/agent.rs` — агентский режим (идея из проекта chebupelka): каталог инструментов (read_file/list_dir/write_file/run_command), их исполнение, цикл «модель ↔ инструменты» и поток событий для наблюдения. Разрешения: (1) allowlist — агенту предъявляются только разрешённые инструменты; (2) режим прав `PermMode` Auto/Ask — в Ask агент ждёт подтверждения каждого вызова через `Approvals` (карта `oneshot`-каналов, будится из `/api/agent/approve`).
-- `src/server.rs` — axum: роуты `/`, `/api/chat`, `/api/chat/stream` (SSE), `/api/stats`, `/api/agent/tools`, `/api/agent/stream` (SSE), `/api/agent/approve`. `AppState` держит `Approvals`. Есть graceful shutdown по Ctrl+C.
-- `src/stats.rs` — атомарные счётчики в памяти + `snapshot()`.
+- `src/server.rs` — axum: роуты `/`, `/api/chat`, `/api/chat/stream` (SSE), `/api/stats`, `/api/agent/tools`, `/api/agent/stream` (SSE), `/api/agent/approve`, `/api/history` (GET список / POST сохранить), `/api/history/:id` (GET / DELETE). `AppState` держит `Approvals`. Есть graceful shutdown по Ctrl+C.
+- `src/stats.rs` — атомарные счётчики в памяти + кольцо скоростей последних запросов (для графика) + `snapshot()`.
+- `src/history.rs` — сохранение диалогов на диск: JSON-файл на диалог в `data/conversations/` (save/list/load/delete).
 - `assets/index.html` — страница чата (встраивается через `include_str!`), стриминг через fetch+reader, опрос статистики раз в секунду.
 - `README.md` — инструкция для человека (установка, запуск).
 
@@ -97,8 +98,8 @@ MVP готов и собирается (`cargo build --release` → `target\rele
 
 1. ✅ СДЕЛАНО. Авто-запуск `llama-server` дочерним процессом (`src/engine.rs`, флаг `--model-path`) + health-check.
 2. ✅ СДЕЛАНО. Кнопка «Стоп» — отмена генерации. Реализована на фронте (`assets/index.html`) через `AbortController`: обрыв fetch роняет SSE-стрим в axum → reqwest закрывает соединение → llama-server отменяет задачу (`cancel task`). Бэкенд менять не пришлось. Частичный ответ сохраняется в историю.
-3. Сохранение истории диалогов на диск.
-4. График скорости на странице статистики.
+3. ✅ СДЕЛАНО. Сохранение истории диалогов на диск (`src/history.rs`, `data/conversations/`). В чате тулбар «+ Новый» и список сохранённых диалогов; авто-сохранение после ответа модели.
+4. ✅ СДЕЛАНО. График скорости на вкладке «Статистика» (`stats.rs` копит tok/s последних запросов; canvas-график в `index.html` без внешних библиотек).
 5. Переезд на FFI (`llama-cpp-2`) → один бинарник. Это самый крупный шаг; меняем только `backend.rs`, на Windows понадобится C++‑тулчейн и cmake.
 
 ✅ СВЕРХ ПЛАНА (по просьбе пользователя): агентский режим с инструментами,
