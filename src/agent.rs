@@ -13,13 +13,71 @@
 use async_stream::stream;
 use futures_util::Stream;
 use serde_json::{json, Value};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tokio::sync::oneshot;
 use tokio::time::timeout;
 
 use crate::backend::Backend;
 
 const MAX_TURNS: usize = 8; // защита от бесконечного цикла вызовов
 const MAX_RESULT_CHARS: usize = 4000; // не раздуваем контекст результатами
+const APPROVAL_TIMEOUT_S: u64 = 300; // сколько ждём решение пользователя
+
+/// Режим выдачи разрешений на вызовы инструментов.
+#[derive(Clone, Copy, PartialEq)]
+pub enum PermMode {
+    /// выполнять разрешённые инструменты сразу
+    Auto,
+    /// спрашивать подтверждение перед каждым вызовом
+    Ask,
+}
+
+impl PermMode {
+    /// Безопасный разбор: явное "auto" → Auto, всё прочее (в т.ч. пусто) → Ask.
+    pub fn parse(s: &str) -> Self {
+        if s == "auto" {
+            PermMode::Auto
+        } else {
+            PermMode::Ask
+        }
+    }
+}
+
+/// Реестр ожидающих подтверждений: id вызова → канал, по которому придёт решение.
+/// Агент регистрирует ожидание и засыпает на приёмнике; эндпоинт `/api/agent/approve`
+/// будит его через `resolve`.
+#[derive(Clone, Default)]
+pub struct Approvals {
+    inner: Arc<Mutex<HashMap<String, oneshot::Sender<bool>>>>,
+}
+
+impl Approvals {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn register(&self, id: String) -> oneshot::Receiver<bool> {
+        let (tx, rx) = oneshot::channel();
+        self.inner.lock().unwrap().insert(id, tx);
+        rx
+    }
+
+    /// Передать решение пользователя ждущему вызову. Возвращает true, если ждали.
+    pub fn resolve(&self, id: &str, approved: bool) -> bool {
+        if let Some(tx) = self.inner.lock().unwrap().remove(id) {
+            let _ = tx.send(approved);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn cancel(&self, id: &str) {
+        self.inner.lock().unwrap().remove(id);
+    }
+}
 
 /// Каталог инструментов: имя + человекочитаемое описание (для галочек в UI).
 pub fn catalog() -> Vec<(&'static str, &'static str)> {
@@ -79,6 +137,10 @@ pub enum AgentEvent {
     Status(String),
     Assistant(String),
     ToolCall { name: String, args: String },
+    /// в режиме «спрашивать»: ждём решение пользователя по этому вызову
+    ApprovalRequest { id: String, name: String, args: String },
+    /// пользователь отклонил вызов
+    Rejected { name: String },
     ToolResult { name: String, ok: bool, result: String },
     Denied { name: String },
     Final(String),
@@ -92,6 +154,10 @@ impl AgentEvent {
             AgentEvent::Status(s) => ("status", json!({ "text": s })),
             AgentEvent::Assistant(s) => ("assistant", json!({ "text": s })),
             AgentEvent::ToolCall { name, args } => ("tool_call", json!({ "name": name, "args": args })),
+            AgentEvent::ApprovalRequest { id, name, args } => {
+                ("approval_request", json!({ "id": id, "name": name, "args": args }))
+            }
+            AgentEvent::Rejected { name } => ("rejected", json!({ "name": name })),
             AgentEvent::ToolResult { name, ok, result } => {
                 ("tool_result", json!({ "name": name, "ok": ok, "result": result }))
             }
@@ -216,7 +282,14 @@ async fn run_command(command: &str) -> (bool, String) {
 
 /// Запустить агента: возвращает поток событий (для стрима в браузер).
 /// `allowed` — имена разрешённых инструментов; агенту предъявляются только они.
-pub fn run(be: Backend, task: String, allowed: Vec<String>) -> impl Stream<Item = AgentEvent> {
+/// `mode` — выполнять сразу или спрашивать подтверждение на каждый вызов.
+pub fn run(
+    be: Backend,
+    task: String,
+    allowed: Vec<String>,
+    mode: PermMode,
+    approvals: Approvals,
+) -> impl Stream<Item = AgentEvent> {
     stream! {
         let tools = allowed_tools_json(&allowed);
         let tools_line = if allowed.is_empty() {
@@ -263,20 +336,46 @@ pub fn run(be: Backend, task: String, allowed: Vec<String>) -> impl Stream<Item 
             for tc in &at.tool_calls {
                 yield AgentEvent::ToolCall { name: tc.name.clone(), args: tc.arguments.clone() };
 
-                let result = if !allowed.contains(&tc.name) {
-                    // подстраховка: модель не должна знать о неразрешённых, но мало ли
+                // 1) инструмент вообще не разрешён (нет галочки) — отказ без вопросов
+                if !allowed.contains(&tc.name) {
                     yield AgentEvent::Denied { name: tc.name.clone() };
-                    format!("❌ Инструмент «{}» не разрешён пользователем.", tc.name)
-                } else {
-                    let (ok, text) = execute_tool(&tc.name, &tc.arguments).await;
-                    yield AgentEvent::ToolResult { name: tc.name.clone(), ok, result: text.clone() };
-                    text
-                };
+                    messages.push(json!({
+                        "role": "tool", "tool_call_id": tc.id,
+                        "content": format!("❌ Инструмент «{}» не разрешён пользователем.", tc.name),
+                    }));
+                    continue;
+                }
 
+                // 2) режим «спрашивать» — ждём решение пользователя по этому вызову
+                if mode == PermMode::Ask {
+                    let rx = approvals.register(tc.id.clone());
+                    yield AgentEvent::ApprovalRequest {
+                        id: tc.id.clone(),
+                        name: tc.name.clone(),
+                        args: tc.arguments.clone(),
+                    };
+                    let approved = match timeout(Duration::from_secs(APPROVAL_TIMEOUT_S), rx).await {
+                        Ok(Ok(v)) => v,
+                        _ => {
+                            approvals.cancel(&tc.id); // таймаут или канал закрыт — считаем отказом
+                            false
+                        }
+                    };
+                    if !approved {
+                        yield AgentEvent::Rejected { name: tc.name.clone() };
+                        messages.push(json!({
+                            "role": "tool", "tool_call_id": tc.id,
+                            "content": format!("Пользователь отклонил вызов инструмента «{}».", tc.name),
+                        }));
+                        continue;
+                    }
+                }
+
+                // 3) выполняем
+                let (ok, text) = execute_tool(&tc.name, &tc.arguments).await;
+                yield AgentEvent::ToolResult { name: tc.name.clone(), ok, result: text.clone() };
                 messages.push(json!({
-                    "role": "tool",
-                    "tool_call_id": tc.id,
-                    "content": result,
+                    "role": "tool", "tool_call_id": tc.id, "content": text,
                 }));
             }
         }

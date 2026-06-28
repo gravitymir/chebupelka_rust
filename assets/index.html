@@ -60,6 +60,11 @@
   #agent-tools { display: flex; flex-wrap: wrap; gap: 14px; font-size: 13px; }
   #agent-tools label { color: var(--dim); cursor: pointer; user-select: none; }
   #agent-tools input { accent-color: var(--accent); margin-right: 5px; vertical-align: -1px; }
+  #agent-bar .ctl { font-size: 13px; color: var(--dim); }
+  select { background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; font: inherit; font-size: 13px; cursor: pointer; }
+  select:focus { outline: none; border-color: var(--accent); }
+  .act .ask-row { display: flex; gap: 8px; margin-top: 7px; align-items: center; }
+  .act .ask-row button { padding: 4px 14px; font-size: 13px; }
   #agent-bar .row { display: flex; gap: 10px; }
   .act { max-width: 860px; font-size: 14px; }
   .act .lbl { font-size: 11px; text-transform: uppercase; letter-spacing: .8px; margin-bottom: 3px; }
@@ -102,6 +107,14 @@
         <div class="act status">Опиши задачу, отметь разрешённые инструменты и нажми «Запустить». Каждый шаг агента — вызовы инструментов и их результаты — появится здесь.</div>
       </div>
       <div id="agent-bar">
+        <div class="ctl">
+          <label>Права на инструменты:
+            <select id="agent-mode">
+              <option value="ask">спрашивать каждый раз</option>
+              <option value="auto">выполнять автоматически</option>
+            </select>
+          </label>
+        </div>
         <div id="agent-tools"></div>
         <div class="row">
           <textarea id="agent-task" placeholder="Задача агенту… (напр.: покажи файлы в папке src и прочитай Cargo.toml)"></textarea>
@@ -264,6 +277,37 @@ function setAgentRunning(on) {
   agentStopBtn.hidden = !on;
 }
 
+// блок «нужно разрешение» с кнопками Разрешить/Запретить
+function addApproval(d) {
+  let args = d.args;
+  try { args = JSON.stringify(JSON.parse(d.args)); } catch (_) {}
+  const el = document.createElement('div');
+  el.className = 'act call';
+  const l = document.createElement('div'); l.className = 'lbl'; l.textContent = '⏸ нужно разрешение: ' + d.name;
+  const pre = document.createElement('pre'); pre.textContent = args;
+  const row = document.createElement('div'); row.className = 'ask-row';
+  const yes = document.createElement('button'); yes.textContent = 'Разрешить';
+  const no = document.createElement('button'); no.textContent = 'Запретить'; no.className = 'stop';
+  const note = document.createElement('span'); note.className = 'dim';
+  row.appendChild(yes); row.appendChild(no); row.appendChild(note);
+  el.appendChild(l); el.appendChild(pre); el.appendChild(row);
+  agentActs.appendChild(el);
+  agentActs.scrollTop = agentActs.scrollHeight;
+
+  const decide = async (approved) => {
+    yes.disabled = true; no.disabled = true;
+    note.textContent = approved ? ' разрешено' : ' запрещено';
+    try {
+      await fetch('/api/agent/approve', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: d.id, approved }),
+      });
+    } catch (_) {}
+  };
+  yes.onclick = () => decide(true);
+  no.onclick = () => decide(false);
+}
+
 function handleAgentEvent(kind, data) {
   let d = {};
   try { d = JSON.parse(data); } catch (_) { return; }
@@ -276,6 +320,8 @@ function handleAgentEvent(kind, data) {
       addAct('call', '→ вызов: ' + d.name, args, true);
       break;
     }
+    case 'approval_request': addApproval(d); break;
+    case 'rejected': addAct('denied', '', '✋ Вызов «' + d.name + '» отклонён пользователем.'); break;
     case 'tool_result': addAct('result' + (d.ok ? '' : ' err'), '← ' + d.name + (d.ok ? '' : ' (ошибка)'), d.result, true); break;
     case 'denied': addAct('denied', '', '⛔ Инструмент «' + d.name + '» не разрешён.'); break;
     case 'final': addAct('final', '✓ итог', (d.text && d.text.trim()) ? d.text : '(готово)'); break;
@@ -287,16 +333,18 @@ async function runAgent() {
   const task = agentTask.value.trim();
   if (!task) return;
   const allowed = [...agentTools.querySelectorAll('input:checked')].map(i => i.value);
+  const mode = document.getElementById('agent-mode').value;
   agentTask.value = '';
   setAgentRunning(true);
-  addAct('status', '', '▶ Задача: ' + task + '  · разрешено: ' + (allowed.join(', ') || 'ничего'));
+  addAct('status', '', '▶ Задача: ' + task + '  · разрешено: ' + (allowed.join(', ') || 'ничего')
+    + '  · режим: ' + (mode === 'auto' ? 'автоматически' : 'спрашивать'));
   agentCtrl = new AbortController();
 
   try {
     const resp = await fetch('/api/agent/stream', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ task, allowed }),
+      body: JSON.stringify({ task, allowed, mode }),
       signal: agentCtrl.signal,
     });
     if (!resp.ok) throw new Error('HTTP ' + resp.status);

@@ -22,6 +22,8 @@ use crate::stats::Stats;
 struct AppState {
     be: Backend,
     stats: Stats,
+    /// реестр ожидающих подтверждений для агента (режим «спрашивать»)
+    approvals: crate::agent::Approvals,
 }
 
 #[derive(Deserialize)]
@@ -35,12 +37,22 @@ struct AgentBody {
     /// имена инструментов, которые пользователь разрешил агенту
     #[serde(default)]
     allowed: Vec<String>,
+    /// "auto" — выполнять сразу; иначе (в т.ч. пусто) — спрашивать подтверждение
+    #[serde(default)]
+    mode: String,
+}
+
+#[derive(Deserialize)]
+struct ApproveBody {
+    id: String,
+    approved: bool,
 }
 
 pub async fn run(be: Backend, bind: &str) -> Result<()> {
     let state = AppState {
         be,
         stats: Stats::new(),
+        approvals: crate::agent::Approvals::new(),
     };
     let router = Router::new()
         .route("/", get(index))
@@ -49,6 +61,7 @@ pub async fn run(be: Backend, bind: &str) -> Result<()> {
         .route("/api/stats", get(stats_handler))
         .route("/api/agent/tools", get(agent_tools))
         .route("/api/agent/stream", post(agent_stream))
+        .route("/api/agent/approve", post(agent_approve))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(bind).await?;
@@ -77,8 +90,10 @@ async fn agent_tools() -> impl IntoResponse {
 /// Запуск агента: стримим события (вызовы инструментов, результаты, финал) по SSE.
 async fn agent_stream(State(app): State<AppState>, Json(body): Json<AgentBody>) -> impl IntoResponse {
     let be = app.be.clone();
+    let mode = crate::agent::PermMode::parse(&body.mode);
+    let approvals = app.approvals.clone();
     let stream = async_stream::stream! {
-        let events = crate::agent::run(be, body.task, body.allowed);
+        let events = crate::agent::run(be, body.task, body.allowed, mode, approvals);
         futures_util::pin_mut!(events);
         while let Some(ev) = events.next().await {
             let (kind, data) = ev.to_sse();
@@ -87,6 +102,12 @@ async fn agent_stream(State(app): State<AppState>, Json(body): Json<AgentBody>) 
         yield Ok(Event::default().event("end").data("end"));
     };
     Sse::new(stream)
+}
+
+/// Подтверждение/отклонение конкретного вызова инструмента (режим «спрашивать»).
+async fn agent_approve(State(app): State<AppState>, Json(b): Json<ApproveBody>) -> impl IntoResponse {
+    let found = app.approvals.resolve(&b.id, b.approved);
+    Json(serde_json::json!({ "ok": found }))
 }
 
 async fn index() -> Html<&'static str> {

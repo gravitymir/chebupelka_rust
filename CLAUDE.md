@@ -36,8 +36,8 @@ llama-server) затронул только этот файл. Не размаз
 - `src/main.rs` — точка входа, CLI на clap. Подкоманды: `serve` (веб) и `chat` (терминал). Флаг `--model-path` включает авто-запуск движка.
 - `src/backend.rs` — слой инференса: `complete()` (полный ответ), `stream()` (потоковый) и `chat_tools()` (запрос с инструментами для агента). Тут и только тут — знание про HTTP-протокол llama-server.
 - `src/engine.rs` — авто-запуск `llama-server` дочерним процессом (`tokio::process`) + health-check по `/health` + остановка (`kill_on_drop`). Включается флагом `--model-path`. Запускает движок с `--jinja` (нужно для tool-calling). При переезде на FFI удаляется целиком.
-- `src/agent.rs` — агентский режим (идея из проекта chebupelka): каталог инструментов (read_file/list_dir/write_file/run_command), их исполнение, цикл «модель ↔ инструменты» и поток событий для наблюдения. Разрешения: агенту предъявляются только разрешённые инструменты.
-- `src/server.rs` — axum: роуты `/`, `/api/chat`, `/api/chat/stream` (SSE), `/api/stats`, `/api/agent/tools`, `/api/agent/stream` (SSE). Есть graceful shutdown по Ctrl+C.
+- `src/agent.rs` — агентский режим (идея из проекта chebupelka): каталог инструментов (read_file/list_dir/write_file/run_command), их исполнение, цикл «модель ↔ инструменты» и поток событий для наблюдения. Разрешения: (1) allowlist — агенту предъявляются только разрешённые инструменты; (2) режим прав `PermMode` Auto/Ask — в Ask агент ждёт подтверждения каждого вызова через `Approvals` (карта `oneshot`-каналов, будится из `/api/agent/approve`).
+- `src/server.rs` — axum: роуты `/`, `/api/chat`, `/api/chat/stream` (SSE), `/api/stats`, `/api/agent/tools`, `/api/agent/stream` (SSE), `/api/agent/approve`. `AppState` держит `Approvals`. Есть graceful shutdown по Ctrl+C.
 - `src/stats.rs` — атомарные счётчики в памяти + `snapshot()`.
 - `assets/index.html` — страница чата (встраивается через `include_str!`), стриминг через fetch+reader, опрос статистики раз в секунду.
 - `README.md` — инструкция для человека (установка, запуск).
